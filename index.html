@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>명조: 아카네 스킬 프로토타입</title>
+    <title>명조: 아카네 스킬 시뮬레이터</title>
     <style>
       /* --- 기본 설정 --- */
       * {
@@ -678,7 +678,7 @@
         chargeStart: 0,
         combo: 1,
         comboT: 0,
-        skill: { phase: 1, pos: null, cd: 0, timer: 0 },
+        skill: { phase: 1, pos: null, cd: 0, timer: 0, enhanced: false },
         ult: { cd: 0 },
         introAnim: {
           active: false,
@@ -766,7 +766,7 @@
           state.stats.en = 0;
           state.stats.st = 0;
           state.stats.concerto = 0;
-          state.skill = { phase: 1, pos: null, cd: 0, timer: 0 };
+          state.skill = { phase: 1, pos: null, cd: 0, timer: 0, enhanced: false };
           state.ult.cd = 0;
           state.flags.jump = false;
           state.isSwitchedOut = false;
@@ -864,13 +864,16 @@
           }
           if (state.skill.cd > 0) state.skill.cd--;
           if (state.ult.cd > 0) state.ult.cd--;
+          
+          // 2차 스킬 발동 대기 시간(4초) 초과 시 초기화
           if (
             state.skill.phase === 2 &&
             Date.now() - state.skill.timer > 4000
           ) {
             state.skill.phase = 1;
             state.skill.pos = null;
-            state.skill.cd = 12 * 60;
+            state.skill.enhanced = false;
+            // 2차 발동 안했으므로 쿨타임 없음(기획 의도에 따라 조정 가능, 여기선 초기화만)
           }
 
           if (state.outroBuffTime > 0) state.outroBuffTime -= 16.6;
@@ -887,8 +890,14 @@
                 }
               });
             }
-            if (fx.type === "ult" && fx.life % 60 === 0)
-              combat.hitCheck(fx.x, fx.y, 1000, "DoT", false, 0);
+            if (fx.type === "ult") {
+              if (fx.life % 60 === 0)
+                combat.hitCheck(fx.x, fx.y, 1000, "DoT", false, 0);
+              // 궁극기 지속시간 종료 시 쿨타임 25초 시작
+              if (fx.life <= 1) {
+                state.ult.cd = 25 * 60;
+              }
+            }
             if (fx.type === "projectile") {
               fx.x += fx.vx;
               fx.y += fx.vy;
@@ -913,7 +922,6 @@
       const combat = {
         normal: () => {
           if (state.isSwitchedOut) return;
-          // 활공 중 일반 공격 -> 공중 공격
           if (state.flags.jump || state.flags.gliding) return combat.aerial();
           if (state.flags.acting) return;
           state.flags.acting = true;
@@ -1025,15 +1033,12 @@
         skill: () => {
           if (state.isSwitchedOut) return;
           if (state.flags.acting) return;
+
+          // [2차 스킬: 칼날 폭풍 / 낙풍]
           if (state.skill.phase === 2 && state.skill.pos) {
             state.flags.acting = true;
-            let enh = false;
-            if (state.stats.st >= 1) {
-              state.stats.st--;
-              state.stats.en -= 50;
-              enh = true;
-              ui.text(state.p.x, state.p.y - 50, "-1 Stack", "red");
-            }
+            let enh = state.skill.enhanced; // 1차에서 결정된 강화 여부 사용
+
             let hits = state.enemies.filter(
               (e) =>
                 Math.hypot(e.x - state.skill.pos.x, e.y - state.skill.pos.y) <
@@ -1046,6 +1051,7 @@
                 ui.spawnOneShot(fxName, e.x, e.y, rot);
                 ui.text(e.x, e.y, enh ? "낙풍!" : "칼날!");
               });
+              // 2차 스킬 적중 시 강화 여부와 관계없이 1스택(50pt) 획득
               combat.gain(50, 15);
             } else
               ui.spawnOneShot(
@@ -1054,18 +1060,36 @@
                 state.skill.pos.y,
                 rot
               );
+            
             state.skill.phase = 1;
             state.skill.pos = null;
+            state.skill.enhanced = false;
+            // 2차 스킬 사용 후 쿨타임 12초 적용
             state.skill.cd = 12 * 60;
             setTimeout(() => (state.flags.acting = false), 400);
             return;
           }
+
+          // [1차 스킬: 선율의 바람]
           if (state.skill.cd > 0) return;
           state.flags.acting = true;
+          
+          // 1차 스킬 발동 시 스택 있으면 소모하여 2차 강화 예약
+          if (state.stats.st >= 1) {
+            state.stats.st--;
+            state.skill.enhanced = true; // 강화 예약
+            ui.text(state.p.x, state.p.y - 50, "-1 Stack (강화 장전)", "red");
+          } else {
+            state.skill.enhanced = false;
+          }
+
           const tx = state.p.x + Math.cos(state.p.rot) * 150;
           const ty = state.p.y + Math.sin(state.p.rot) * 150;
           ui.spawnZone("storm", tx, ty, 150, 180);
-          combat.gain(0, 15);
+          
+          // 1차 스킬 적중 시 에너지 획득 없음 (기획서: 2차 적중 시 획득)
+          combat.gain(0, 15); 
+          
           state.skill.phase = 2;
           state.skill.pos = { x: tx, y: ty };
           state.skill.timer = Date.now();
@@ -1081,6 +1105,7 @@
             enh = true;
             ui.text(state.p.x, state.p.y - 50, "-3 Stacks (강화)", "red");
           }
+          // 25초 지속 (60frame * 25)
           ui.spawnZone("ult", state.p.x, state.p.y, 1000, 1500, enh);
 
           let t = hit.getClosest();
@@ -1093,7 +1118,7 @@
 
           combat.hitCheck(state.p.x, state.p.y, 1000, "쾅!", false, 0);
           combat.gain(0, 20);
-          state.ult.cd = 25 * 60;
+          // 쿨타임은 game.loop에서 존이 사라질 때 설정
         },
         outro: () => {
           if (state.isSwitchedOut || state.stats.concerto < 100) return;
@@ -1412,17 +1437,21 @@
           const sBtn = document.getElementById("btn-skill"),
             sTxt = document.getElementById("txt-skill");
           if (sBtn && sTxt) {
-            if (state.skill.phase === 2 && state.stats.st >= 1) {
+            // UI 표시 로직 수정: 강화 상태이거나(이미 1차에서 소모함), 1차 상태인데 깃털이 1개 이상이면 노란 불
+            if (state.skill.enhanced || (state.skill.phase === 1 && state.stats.st >= 1)) {
+                sBtn.classList.add("btn-enh");
+            } else {
+                sBtn.classList.remove("btn-enh");
+            }
+
+            if (state.skill.phase === 2 && state.skill.enhanced) {
               sTxt.innerHTML =
-                "⭐ 낙풍 (강화) [E]<br> <span class='desc'>1스택 소모하여 하강 기류로 적을 타격합니다.</span>";
-              sBtn.classList.add("btn-enh");
+                "⭐ 낙풍 (강화) [E]<br> <span class='desc'>하강 기류로 적을 타격합니다. (강화됨)</span>";
             } else if (state.skill.phase === 2) {
               sTxt.innerHTML =
                 "칼날 폭풍 [E]<br> <span class='desc'>바람 칼날로 적을 베어 피해를 줍니다.</span>";
-              sBtn.classList.remove("btn-enh");
             } else {
               sTxt.innerHTML = "전방에 폭풍을 생성하여 적을 견인합니다.";
-              sBtn.classList.remove("btn-enh");
             }
           }
           const uBtn = document.getElementById("btn-ult"),
